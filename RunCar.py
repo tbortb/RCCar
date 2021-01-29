@@ -15,12 +15,15 @@ cameraServoPortV = 2
 cameraServoPortH = 1
 steeringServoPort = 0
 
+#Connected LED to registerr of PCA9685
+allLEDs = [13, 14, 15]
+
 #Set maximum turning angle (in terms of PWM range 0-4096 from PCA9685)
 servoMax = 485
 servoMin = 295
 
 #Create connection to the gamepad (topleft USB plug)
-gamepad = InputDevice('/dev/input/event0')
+gamepad = InputDevice('/dev/input/event1')
 
 #Set output Pins to control DC motor driving direction for bith motors
 GPIO.setmode(GPIO.BCM)
@@ -34,7 +37,7 @@ GPIO.setup(directionChannelRR, GPIO.OUT)
 #This creates a boolean wrapped in a variable that can be used by multiple processes
 cameraProcessRunning = multiprocessing.Value('b', False)
 redTrackingRunning = multiprocessing.Value('b', False)
-movementTrackingRunning = multiprocessing.Value('b', False)
+faceCountRunning = multiprocessing.Value('b', False)
 drivingBackwards = multiprocessing.Value('b', False)
 
 
@@ -151,6 +154,7 @@ def trackRed(isActiveThread, backwardFlag, cameraServoValueH = (servoMin + servo
         maxBrightH, maxBrightV, filterdByHSV = filterByHSV(img, invertFilter = True)
         #cv2.imshow("differenceRedGrey", differenceRedGrey)
         cv2.imshow("filterdByHSV", filterdByHSV)
+        
         #Nicht die absolute auslenkung, sondern nur der increment der auslenkung sollte durch die farbe bestimmt werden
         cameraServoValueH += int(convert(maxBrightH,
                                    inputMin = 0, inputMax = 640,
@@ -223,13 +227,64 @@ def inRangeT(hsvImg, lowerBound, upperBound):
     filterThree = cv2.inRange(hsvImg[:, :, 2], lowerBound[2], upperBound[2])
     return np.where(filterOne == 255, 255, np.where(filterTwo == 255, 255, np.where(filterThree == 255, 255, 0))).astype(np.uint8)
 
+def countFaces(isActiveThread):
+    cap = cv2.VideoCapture(0)
 
-wakeup(adresse)   
+    while True:
+        result, img = cap.read()
+        
+        amountFaces, showImg = detect_faces(img)
+
+        cv2.imshow("Video", showImg)
+        lightLEDs(amountFaces)
+        if cv2.waitKey(10) & 0xFF == ord('q'):
+            break
+        
+        if not isActiveThread.value:
+            break
+        
+        time.sleep(1)
+
+    cap.release()
+    cv2.destroyAllWindows()
+    
+def detect_faces(test_image,
+                 scaleFactor = 1.1,
+                cascade = cv2.CascadeClassifier('fronatFace2.xml')):
+    # create a copy of the image to prevent any changes to the original one.
+    image_copy = test_image.copy()
+    
+    #convert the test image to gray scale as opencv face detector expects gray images
+    gray_image = cv2.cvtColor(image_copy, cv2.COLOR_BGR2GRAY)
+    
+    # Applying the haar classifier to detect faces
+    faces_rect = cascade.detectMultiScale(gray_image, scaleFactor=scaleFactor, minNeighbors=5)
+    
+    for (x, y, w, h) in faces_rect:
+        cv2.rectangle(image_copy, (x, y), (x+w, y+h), (0, 255, 0), 1)
+        
+    return len(faces_rect), image_copy
+    
+def lightLEDs(amount):
+    off = 2500
+    for i in range(len(allLEDs)):
+        if i <= (amount - 1):
+            myBus.write_byte_data(adresse, 6 + 4*allLEDs[i], 0 & 255)
+            myBus.write_byte_data(adresse, 7 + 4*allLEDs[i], 0 >> 8)
+            myBus.write_byte_data(adresse, 8 + 4*allLEDs[i], off & 255)
+            myBus.write_byte_data(adresse, 9 + 4*allLEDs[i], off >> 8)
+        else:
+            myBus.write_byte_data(adresse, 6 + 4*allLEDs[i], 0 & 255)
+            myBus.write_byte_data(adresse, 7 + 4*allLEDs[i], 0 >> 8)
+            myBus.write_byte_data(adresse, 8 + 4*allLEDs[i], 0 & 255)
+            myBus.write_byte_data(adresse, 9 + 4*allLEDs[i], 0 >> 8)
+
+wakeup(adresse)
 
 #Now handle the controller events
 for event in gamepad.read_loop():
     if event.code != 0 or event.type != 0 or event.value != 0: #There are some signals seemingly without content
-        if not (redTrackingRunning.value or movementTrackingRunning.value): 
+        if not redTrackingRunning.value: 
             if event.type == 3 and event.code == 4: #vertical camera servo
                 write_Servoauslenkung(adresse, cameraServoPortV, convert(event.value))
             elif event.type == 3 and event.code == 3: #horuzontal camera servo
@@ -266,5 +321,11 @@ for event in gamepad.read_loop():
                 redTrackingProcess.join()
                 
         elif event.type == 1 and event.code == 310 and event.value == 1: #Linke Schultertaste
-            #implement trace movement here
-            pass
+            #implement face count here
+            if not faceCountRunning.value:
+                faceCountRunning.value = True
+                faceCountProcess = multiprocessing.Process(target = countFaces, args = [faceCountRunning])
+                faceCountProcess.start()
+            else:
+                faceCountRunning.value = False
+                faceCountProcess.join()
